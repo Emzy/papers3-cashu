@@ -878,7 +878,10 @@ bool lgfx_qrcode_getModule(QRCode *qrcode, uint_fast8_t x, uint_fast8_t y) {
     }
 
     uint32_t offset = y * qrcode->size + x;
-    return qrcode->modules[offset >> 3] & (1 << (7 - (offset & 0x07)));
+    // The C header typedefs bool as unsigned char on pre-C23 compilers,
+    // while C++ callers use native bool. Normalize the return value to 0/1
+    // so a set high bit is not lost at that ABI boundary.
+    return (qrcode->modules[offset >> 3] & (1 << (7 - (offset & 0x07)))) != 0;
 }
 
 /*

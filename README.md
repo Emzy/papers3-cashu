@@ -1,8 +1,10 @@
 # Cashu for M5Stack PaperS3
 
+**Version 0.2.0 — token selector and larger QR codes.**
+
 An experimental native port of [Nucula](https://github.com/zeugmaster/nucula) to the [M5Stack PaperS3](https://docs.m5stack.com/en/core/PaperS3). Wallet cryptography, proofs, and mint requests run on the ESP32-S3. A computer supplies pasted input over USB; it is not a wallet server.
 
-**Status: cross-compiled successfully; host storage tests pass; not flashed or tested on a physical PaperS3. Use a development mint with valueless test ecash. This is not a production wallet.** Network transaction recovery and physical device validation remain unfinished; see the limitations below.
+**Status: cross-compiled successfully; host storage, selection and QR tests pass; not flashed or tested on a physical PaperS3. Use a development mint with valueless test ecash. This is not a production wallet.** Network transaction recovery and physical device validation remain unfinished; see the limitations below.
 
 ## Included
 
@@ -11,7 +13,8 @@ An experimental native port of [Nucula](https://github.com/zeugmaster/nucula) to
 - Touch amount entry, Lightning deposit invoice QR, persisted invoice and a Check payment button.
 - USB import of Cashu v3/v4 tokens; redemption happens directly with the mint over Wi-Fi.
 - USB BOLT11 payment input with amount, routing reserve and mint shown for physical confirmation.
-- Send all sat proofs from the selected mint as a Cashu v4 token. The saved outbox survives reboot; it is debited before being displayed. Arbitrary-amount ecash sends are not implemented.
+- Send ecash opens a paginated denomination selector. Choose one or more stored sat proofs and review their total; only those proofs are exported. The saved outbox survives reboot and is debited before display. Arbitrary-amount splitting/change is not implemented.
+- Each selected proof is shown as its own complete Cashu v4 QR, with Previous/Next controls. The 520×520-pixel area, minimum five-pixel modules, four-module white border and full-quality e-paper refresh improve readability. DLEQ data and witnesses are retained.
 - Saved Wi-Fi setup over USB. No credentials are included in the firmware.
 - CA/hostname and certificate-date validation, HTTPS-only mint requests, and disabled HTTP redirects.
 - No automatic erasure of wallet NVS after storage errors. Boot stops if wallet self-tests or outbox recovery fail.
@@ -43,6 +46,8 @@ python -m esptool --chip esp32s3 --port PORT erase_region 0x9000 0xF6000
 ```
 
 That command permanently deletes everything in the specified region. Do not use it as an upgrade or recovery step for a funded wallet. The firmware deliberately does not run it automatically.
+
+For the version 0.2 update, see [UPDATE.md](UPDATE.md) for the local command using the already-installed esptool.
 
 For subsequent updates of this port with the same partition layout, flash only the application:
 
@@ -77,11 +82,16 @@ The Wi-Fi command splits on the first `|`, so spaces in SSIDs/passwords work; SS
 
 **Pay Lightning:** paste `melt lnbc…` over USB. With multiple mints, append `w=0`, `w=1` or `w=2`. The console requests a quote; the device displays the amount and routing reserve. Tap Pay now to spend or Cancel to abandon the quote. Mint input fees may also apply. A PENDING result is not reported as payment completion.
 
-**Send ecash:** tap Send ecash and review the amount and mint, then Create token. This exports **all sat proofs from that mint**, retaining any other units. The recipient scans the QR. If the token exceeds the readable QR limit, the screen says so; use `outbox` over USB to retrieve the full token. Only one saved outgoing token is supported. Its receiver may pay mint redemption fees.
+**Send ecash:** tap Send ecash, then tap the denominations you want to send. Checkboxes distinguish tokens with the same denomination; the token number identifies its row. Use Previous/Next for additional rows. Review shows the exact selected total before Create token. Unselected proofs and other units remain in your wallet. If one of the selected proofs changes before confirmation, the export is rejected and you must select again.
 
-**Keep the saved token until it is redeemed or backed up.** The wallet subtracts exported proofs from the balance before showing the token. Removing the saved copy does not refund them. Home / hide QR clears the visible token, but an e-paper image remains visible if power is cut while its QR is displayed.
+**Scan the selected tokens:** the saved outbox displays one independently redeemable Cashu v4 token per QR, with its amount and “QR N of M.” Use Previous/Next and have the recipient scan **every selected code separately**. This is not an animated/multipart QR format. For example, selecting 8 and 2 sats produces two codes worth 8 and 2 sats. A code can only be redeemed once, and each redemption may incur mint fees.
 
-Useful commands: `help`, `balance`, `mint list`, `mint info`, `invoice 100 w=0`, `claim QUOTE_ID w=0`, `outbox`, `heap`, `tasks`, `selftest`, `reboot`. Mint removal, destructive seed replacement, and the original unsaved `stickup` drain are disabled. Touch screens and Lightning confirmation support sats/bolt11 only; the inherited core has broader unit support.
+Each code uses a 520×520 area and at least five physical pixels per module. A long single proof that still cannot fit uses the USB fallback `outbox N`, where N is its displayed QR number. `outbox` without a number returns the entire saved bundle for backup. If some codes have already been redeemed, use individual remaining codes or `outbox N`; the full bundle still contains the spent proofs.
+
+**Keep the saved copy until every code has been redeemed or backed up.** The wallet subtracts selected proofs before showing the codes. Removing the saved copy does not refund them. Only one outgoing bundle can be saved at a time; opening Send ecash while it exists reopens it. Home / hide QR clears the visible code, but an e-paper image remains visible if power is cut while its QR is displayed. Old outboxes from version 0.1 are supported and can be viewed one proof per code.
+
+
+Useful commands: `help`, `balance`, `mint list`, `mint info`, `invoice 100 w=0`, `claim QUOTE_ID w=0`, `outbox [QR number]`, `heap`, `tasks`, `selftest`, `reboot`. Mint removal, destructive seed replacement, and the original unsaved `stickup` drain are disabled. Touch screens and Lightning confirmation support sats/bolt11 only; the inherited core has broader unit support.
 
 ## Build from source
 
@@ -102,7 +112,7 @@ Host storage tests require a C/C++17 compiler:
 bash tests/run.sh
 ```
 
-These compile the real `papers3_storage.cpp` against simulated NVS and wallet/token boundaries. They test commit-before-debit ordering, power loss between commits, replay, failed writes/debits, overwrite prevention, invoice round trips and corrupt-record rejection. They do **not** validate the Cashu protocol, real flash behavior, the display, or the network stack. Crypto/keyset/codec/wallet self-tests are compiled into the firmware and run on boot; they have not been executed on hardware here.
+Storage tests compile the real `papers3_storage.cpp` against simulated NVS and wallet/token boundaries. They test commit-before-debit ordering, power loss between commits, replay, failed writes/debits, overwrite prevention, invoice round trips and corrupt-record rejection. Additional tests check denomination selection, stale or duplicate proof rejection, independent QR pages with complete metadata, minimum module size and quiet-zone margins using the actual QR encoder. These tests do **not** validate the Cashu protocol, real flash behavior, the display, or the network stack. Crypto/keyset/codec/wallet self-tests are compiled into the firmware and run on boot; they have not been executed on hardware here.
 
 ## Remaining work before real funds
 
@@ -110,8 +120,8 @@ These compile the real `papers3_storage.cpp` against simulated NVS and wallet/to
 - **Pending Lightning payments:** the inherited melt flow removes submitted proofs after PENDING, but does not provide a complete persistent pending-payment/change-recovery workflow. Do not retry an uncertain payment blindly.
 - **Storage/security:** proofs, seeds and credentials are in ordinary unencrypted flash. There is no PIN, secure-element integration, flash-encryption setup, secure-boot setup or tamper resistance. USB exposes development commands, including seed viewing. This is not a hardened hardware wallet.
 - **Recovery:** deterministic secrets are inherited, but a complete NUT-09 recovery interface is absent. A seed alone is not a demonstrated backup for this firmware; preserve the device's data and exported bearer tokens.
-- **Physical validation:** display orientation, QR scans, touch hitboxes, PSRAM load, HTTPS handshakes, reconnection, battery use and power-cut tests still need the actual device. No PaperS3 was attached during development.
-- **UX:** arbitrary-amount ecash sends, scanned input, phone provisioning, transaction history and low-power operation remain to be implemented.
+- **Physical validation:** display orientation, QR scans, touch hitboxes, PSRAM load, HTTPS handshakes, reconnection, battery use and power-cut tests still need the actual device. No agent-run hardware validation has been performed.
+- **UX:** arbitrary-amount ecash splitting/change, scanned input, phone provisioning, transaction history and low-power operation remain to be implemented.
 - **Trust:** Cashu balances are claims on the selected mint. The touchscreen port does not remove mint custody or redemption risk.
 
 See [HARDWARE-TEST.md](HARDWARE-TEST.md) for a test sequence and [VALIDATION.md](VALIDATION.md) for exactly what was checked locally. Original upstream documentation is retained as [README.upstream.md](README.upstream.md).

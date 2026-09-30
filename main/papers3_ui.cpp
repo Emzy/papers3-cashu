@@ -3,6 +3,9 @@
 #include "console.h"
 #include "wallet_store.hpp"
 #include "cashu_json.hpp"
+#include "cashu_cbor.hpp"
+#include "papers3_tokens.hpp"
+#include "papers3_qr.hpp"
 #include "wifi.h"
 #include <M5Unified.h>
 #include <lgfx/utility/lgfx_qrcode.h>
@@ -16,12 +19,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
 
 namespace {
-enum class Screen { home, amount, invoice, pay, export_confirm, outbox, forget, info };
+enum class Screen { home, amount, invoice, pay, token_select, export_confirm, outbox, forget, info };
 enum class MessageType { invoice, pay };
 struct Message {
     MessageType type;
@@ -40,7 +44,12 @@ cashu::MeltQuote melt;
 int melt_slot = -1;
 std::string melt_mint, payment_request, digits, notice;
 std::string outbox, export_mint;
-int64_t export_balance = 0;
+PaperTokenSelection token_selection;
+size_t selection_page = 0;
+constexpr size_t tokens_per_page = 4;
+cashu::Token saved_token;
+std::string qr_token;
+size_t qr_page = 0;
 int64_t input_after = 0;
 bool last_wifi = false;
 unsigned frames = 0;
@@ -99,25 +108,50 @@ std::string amount_text(int64_t amount) { return std::to_string(amount) + " sats
 std::string mint_label(const std::string &url) {
     return url.compare(0, 8, "https://") == 0 ? url.substr(8) : url;
 }
-bool draw_qr(const std::string &payload) {
-    // Explicit bounded buffers, >=3 pixels/module and a four-module quiet zone.
-    // Never silently crop a bearer token or build a stack-growing QR loop.
-    if (payload.empty() || payload.size() > 1800) return false;
-    for (uint8_t version = 1; version <= 25; ++version) {
-        QRCode qr;
-        std::vector<uint8_t> data(lgfx_qrcode_getBufferSize(version));
-        if (lgfx_qrcode_initText(&qr, data.data(), version, 0, payload.c_str()) != 0) continue;
-        const int scale = 412 / (qr.size + 8);
-        if (scale < 3) return false;
-        const int left = 30 + (412 - qr.size * scale) / 2;
-        const int top = 80 + (412 - qr.size * scale) / 2;
-        for (int y = 0; y < qr.size; ++y)
-            for (int x = 0; x < qr.size; ++x)
-                if (lgfx_qrcode_getModule(&qr, x, y))
-                    M5.Display.fillRect(left + x * scale, top + y * scale, scale, scale, TFT_BLACK);
-        return true;
+bool draw_qr(const std::string &payload, int x, int y, int size) {
+    PaperQR qr;
+    if (!qr.encode(payload, size)) return false;
+    for (int row = 0; row < qr.code.size; ++row)
+        for (int col = 0; col < qr.code.size; ++col)
+            if (lgfx_qrcode_getModule(&qr.code, col, row))
+                M5.Display.fillRect(x + qr.offset + col * qr.scale,
+                                    y + qr.offset + row * qr.scale,
+                                    qr.scale, qr.scale, TFT_BLACK);
+    return true;
+}
+void set_token_page(size_t page) {
+    cashu::Token token;
+    if (!paper_token_page(saved_token, page, token)) return;
+    qr_page = page;
+    qr_token = cashu::serialize_token_v4(token);
+    dirty = true;
+}
+void open_saved_token() {
+    wallet_store_guard guard;
+    if (!papers3_load_outbox(outbox)) { info("Cannot read saved token."); return; }
+    if (outbox.empty()) { info("No token in the outbox."); return; }
+    saved_token = {};
+    if (!cashu::deserialize_token(outbox.c_str(), saved_token) || saved_token.proofs.empty()) {
+        info("Saved token could not be decoded. Keep the saved data for recovery."); return;
     }
-    return false;
+    set_token_page(0); screen = Screen::outbox; dirty = true;
+}
+void open_token_selector() {
+    wallet_store_guard guard;
+    if (!papers3_load_outbox(outbox)) { info("Cannot read outbox."); return; }
+    if (!outbox.empty()) { open_saved_token(); return; }
+    auto *w = selected_wallet();
+    if (!w) { info("Add a mint before sending ecash."); return; }
+    std::vector<cashu::Proof> proofs;
+    for (const auto &proof : w->proofs()) {
+        const auto *unit = w->unit_for_proof(proof);
+        if (unit && *unit == "sat" && proof.amount > 0) proofs.push_back(proof);
+    }
+    if (proofs.empty()) { info("No sat tokens available from this mint."); return; }
+    export_mint = w->mint_url();
+    token_selection.reset(std::move(proofs));
+    selection_page = 0;
+    screen = Screen::token_select; dirty = true;
 }
 void home() { screen = Screen::home; notice.clear(); dirty = true; }
 
@@ -133,7 +167,15 @@ void draw() {
     const std::string mint = w ? mint_label(w->mint_url()) : "No mint configured";
     const int64_t balance = w ? w->balance_for_unit("sat") : 0;
     wallet_store_unlock();
-    begin_frame("Cashu / PaperS3");
+    if (screen == Screen::outbox) {
+        // Use the full display height for large QR modules, and clear ghosting.
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        M5.Display.startWrite(); M5.Display.fillScreen(TFT_WHITE);
+        text(552, 28, "Saved ecash", 3);
+    } else {
+        begin_frame("Cashu / PaperS3");
+        if (screen == Screen::invoice) M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    }
     switch (screen) {
     case Screen::home:
         text(40, 100, amount_text(balance), 6);
@@ -156,7 +198,7 @@ void draw() {
         }
         break;
     case Screen::invoice:
-        if (!draw_qr(invoice.quote.request)) wrapped(40, 180, "Invoice too large for a readable QR. Use USB: invoice show", 28);
+        if (!draw_qr(invoice.quote.request, 18, 74, 458)) wrapped(40, 180, "Invoice too large for a readable QR. Use USB: invoice show", 28);
         text(490, 95, amount_text(invoice.amount), 4);
         wrapped(490, 160, mint_label(invoice.mint));
         wrapped(490, 255, "Scan with a Lightning wallet. After paying, tap Check payment.");
@@ -172,23 +214,56 @@ void draw() {
         text(40, 400, "Mint input fees may also apply.");
         button(24, 460, 440, "Cancel"); button(490, 460, 440, "Pay now");
         break;
+    case Screen::token_select: {
+        text(24, 92, "Select tokens to send", 3);
+        text(530, 96, amount_text(token_selection.amount()) + " / " +
+             std::to_string(token_selection.count()) + " selected");
+        const size_t first = selection_page * tokens_per_page;
+        for (size_t row = 0; row < tokens_per_page && first + row < token_selection.size(); ++row) {
+            const size_t index = first + row;
+            const auto &proof = token_selection.proof(index);
+            const int y = 140 + row * 72;
+            M5.Display.drawRoundRect(24, y, 912, 62, 6, TFT_BLACK);
+            M5.Display.drawRect(42, y + 16, 30, 30, TFT_BLACK);
+            if (token_selection.selected(index)) M5.Display.fillRect(48, y + 22, 18, 18, TFT_BLACK);
+            text(94, y + 20, amount_text(proof.amount), 3);
+            text(510, y + 25, "Token " + std::to_string(index + 1) +
+                 " / keyset " + proof.id.substr(0, 8));
+        }
+        const size_t pages = (token_selection.size() + tokens_per_page - 1) / tokens_per_page;
+        text(24, 430, "Page " + std::to_string(selection_page + 1) + "/" + std::to_string(pages));
+        text(300, 430, "Tap a row to select or deselect.");
+        button(24, 466, 174, "Cancel", 58);
+        button(214, 466, 154, "Previous", 58);
+        button(384, 466, 154, "Next", 58);
+        const std::string review = token_selection.count() ? "Review " + amount_text(token_selection.amount()) : "Select a token";
+        button(554, 466, 382, review.c_str(), 58);
+        break;
+    }
     case Screen::export_confirm:
-        text(40, 100, "Send all sats from this mint?", 3);
-        text(40, 160, amount_text(export_balance), 5);
+        text(40, 100, "Send selected tokens?", 3);
+        text(40, 160, amount_text(token_selection.amount()), 5);
         wrapped(40, 240, mint_label(export_mint), 65, 2);
-        wrapped(40, 310, "The token is bearer money. Anyone with its QR can redeem it. The recipient may pay mint fees.", 65, 3);
-        button(24, 460, 440, "Cancel"); button(490, 460, 440, "Create token");
+        text(40, 308, std::to_string(token_selection.count()) + " token(s), one QR per token.");
+        wrapped(40, 350, "The recipient scans each code separately. Unselected tokens stay in your wallet.", 65, 2);
+        button(24, 460, 440, "Back to selection"); button(490, 460, 440, "Create token");
         break;
     case Screen::outbox:
-        if (!draw_qr(outbox)) wrapped(40, 180, "Token too large for a readable QR. Use USB command: outbox", 28);
-        text(490, 100, "Saved ecash token", 3);
-        wrapped(490, 175, "Share this token only with its recipient. This copy survives reboot. Keep it until redemption.");
-        button(490, 365, 440, "Home / hide QR");
-        button(490, 450, 440, "Remove saved copy...");
+        if (!draw_qr(qr_token, 10, 10, 520)) {
+            wrapped(40, 180, "This token does not fit a large-pixel QR. Get this code over USB:", 34, 3);
+            text(40, 310, "outbox " + std::to_string(qr_page + 1), 3);
+        }
+        if (qr_page < saved_token.proofs.size()) text(552, 96, amount_text(saved_token.proofs[qr_page].amount), 4);
+        text(552, 160, "QR " + std::to_string(qr_page + 1) + " of " + std::to_string(saved_token.proofs.size()));
+        text(552, 198, "Selected: " + amount_text(cashu::proofs_sum(saved_token.proofs)));
+        wrapped(552, 244, "Scan each code separately.\nAll codes survive reboot.", 32, 2);
+        button(552, 316, 184, "Previous", 58); button(752, 316, 184, "Next", 58);
+        button(552, 396, 384, "Home / hide QR", 58);
+        button(552, 472, 384, "Remove saved copy...", 58);
         break;
     case Screen::forget:
         text(40, 100, "Remove saved token?", 3);
-        wrapped(40, 180, "Only continue after the recipient has redeemed it or you have backed up the full token. Removal cannot be undone and does not return funds to your balance.", 65, 5);
+        wrapped(40, 180, "Only continue after the recipient has redeemed every code or you have backed up the full token. Removal cannot be undone and does not return funds to your balance.", 65, 5);
         button(24, 460, 440, "Keep token"); button(490, 460, 440, "Remove copy");
         break;
     case Screen::info:
@@ -244,17 +319,18 @@ void claim_invoice() {
 }
 void export_token() {
     wallet_store_guard guard;
-    auto *w = selected_wallet();
-    if (!w) { info("No mint configured."); return; }
-    if (w->mint_url() != export_mint || w->balance_for_unit("sat") != export_balance) {
-        info("Balance changed. Review Send ecash again before exporting."); return;
+    auto *w = wallet_store_find(export_mint.c_str());
+    if (!w) { info("Selected mint is no longer available."); return; }
+    cashu::Token token; token.mint = export_mint; token.unit = "sat";
+    token.proofs = token_selection.chosen();
+    std::vector<cashu::Proof> available;
+    for (const auto &proof : w->proofs()) {
+        const auto *unit = w->unit_for_proof(proof);
+        if (unit && *unit == "sat") available.push_back(proof);
     }
-    cashu::Token token; token.mint = w->mint_url(); token.unit = "sat";
-    for (const auto &p : w->proofs()) {
-        const auto *unit = w->unit_for_proof(p);
-        if (unit && *unit == "sat") token.proofs.push_back(p);
+    if (!paper_selection_available(available, token.proofs)) {
+        info("The selected tokens changed. Open Send ecash and select again."); return;
     }
-    if (token.proofs.empty()) { info("No sat proofs available to export."); return; }
     if (!papers3_save_outbox(token)) {
         // A journal may already exist while its debit failed. No more spending.
         busy("Export interrupted; restarting safely...");
@@ -262,7 +338,7 @@ void export_token() {
         esp_restart();
         return;
     }
-    papers3_load_outbox(outbox); screen = Screen::outbox; dirty = true;
+    open_saved_token();
 }
 void pay_invoice() {
     busy("Paying Lightning invoice...");
@@ -280,27 +356,15 @@ void touch(int x, int y) {
     case Screen::home:
         if (hit(x,y,24,335,212)) open_invoice();
         else if (hit(x,y,256,335,212)) info("Paste a BOLT11 invoice over USB:\nmelt <invoice>\n\nReview and confirm the payment on this screen.");
-        else if (hit(x,y,488,335,212)) {
-            wallet_store_guard guard;
-            if (!papers3_load_outbox(outbox)) info("Cannot read outbox.");
-            else {
-                auto *w = selected_wallet();
-                export_mint = w ? w->mint_url() : "";
-                export_balance = w ? w->balance_for_unit("sat") : 0;
-                screen = outbox.empty() ? Screen::export_confirm : Screen::outbox; dirty = true;
-            }
-        } else if (hit(x,y,720,335,212)) {
+        else if (hit(x,y,488,335,212)) open_token_selector();
+         else if (hit(x,y,720,335,212)) {
             wallet_store_guard guard;
             for (int n = 1; n <= MAX_MINTS; ++n) if (wallet_store_get((selected+n)%MAX_MINTS)) {
                 selected = (selected+n)%MAX_MINTS; break;
             }
             dirty = true;
-        } else if (hit(x,y,24,435,212)) {
-            wallet_store_guard guard;
-            if (!papers3_load_outbox(outbox)) info("Cannot read saved token.");
-            else if (outbox.empty()) info("No token in the outbox.");
-            else { screen = Screen::outbox; dirty = true; }
-        } else if (hit(x,y,256,435,212)) { frames = 7; dirty = true; }
+        } else if (hit(x,y,24,435,212)) open_saved_token();
+         else if (hit(x,y,256,435,212)) { frames = 7; dirty = true; }
         break;
     case Screen::amount:
         if (hit(x,y,24,450,300)) home();
@@ -321,19 +385,33 @@ void touch(int x, int y) {
         if (hit(x,y,24,460,440)) { pending_payment = false; home(); }
         else if (hit(x,y,490,460,440)) pay_invoice();
         break;
+    case Screen::token_select:
+        for (size_t row = 0; row < tokens_per_page; ++row) {
+            const size_t index = selection_page * tokens_per_page + row;
+            if (index < token_selection.size() && hit(x,y,24,140 + row * 72,912,62)) {
+                token_selection.toggle(index); dirty = true; break;
+            }
+        }
+        if (hit(x,y,24,466,174,58)) home();
+        else if (hit(x,y,214,466,154,58) && selection_page > 0) { --selection_page; dirty = true; }
+        else if (hit(x,y,384,466,154,58) && (selection_page + 1) * tokens_per_page < token_selection.size()) { ++selection_page; dirty = true; }
+        else if (hit(x,y,554,466,382,58) && token_selection.count() > 0) { screen = Screen::export_confirm; dirty = true; }
+        break;
     case Screen::export_confirm:
-        if (hit(x,y,24,460,440)) home();
+        if (hit(x,y,24,460,440)) { screen = Screen::token_select; dirty = true; }
         else if (hit(x,y,490,460,440)) export_token();
         break;
     case Screen::outbox:
-        if (hit(x,y,490,365,440)) home();
-        else if (hit(x,y,490,450,440)) { screen = Screen::forget; dirty = true; }
+        if (hit(x,y,552,316,184,58) && qr_page > 0) set_token_page(qr_page - 1);
+        else if (hit(x,y,752,316,184,58) && qr_page + 1 < saved_token.proofs.size()) set_token_page(qr_page + 1);
+        else if (hit(x,y,552,396,384,58)) home();
+        else if (hit(x,y,552,472,384,58)) { screen = Screen::forget; dirty = true; }
         break;
     case Screen::forget:
         if (hit(x,y,24,460,440)) { screen = Screen::outbox; dirty = true; }
         else if (hit(x,y,490,460,440)) {
             wallet_store_guard guard;
-            if (papers3_clear_outbox()) { outbox.clear(); home(); }
+            if (papers3_clear_outbox()) { outbox.clear(); saved_token = {}; qr_token.clear(); home(); }
             else info("Could not remove saved token.");
         }
         break;
@@ -365,12 +443,23 @@ void ui_task(void *) {
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
-void cmd_outbox(const char *) {
+void cmd_outbox(const char *arg) {
     wallet_store_guard guard;
     std::string raw;
-    if (!papers3_load_outbox(raw)) console_print("error: outbox read failed\r\n");
-    else if (raw.empty()) console_print("outbox empty\r\n");
-    else { console_print(raw.c_str()); console_print("\r\n"); }
+    if (!papers3_load_outbox(raw)) { console_print("error: outbox read failed\r\n"); return; }
+    if (raw.empty()) { console_print("outbox empty\r\n"); return; }
+    if (arg && *arg) {
+        char *end = nullptr;
+        long page = strtol(arg, &end, 10);
+        cashu::Token saved, part;
+        if (end == arg || *end || page < 1 || !cashu::deserialize_token(raw.c_str(), saved) ||
+            !paper_token_page(saved, static_cast<size_t>(page - 1), part)) {
+            console_print("error: use outbox <QR number>, starting at 1\r\n"); return;
+        }
+        raw = cashu::serialize_token_v4(part);
+        if (raw.empty()) { console_print("error: token serialization failed\r\n"); return; }
+    }
+    console_print(raw.c_str()); console_print("\r\n");
 }
 void cmd_wifi(const char *arg) {
     // Format preserves spaces in SSIDs and passwords; only the first | splits.
@@ -411,7 +500,7 @@ void papers3_start() {
     messages = xQueueCreate(1, sizeof(Message *));
     if (!messages) papers3_fatal("Memory error", "Wallet UI could not start.");
     console_register_cmd("wifi", cmd_wifi, "wifi <SSID>|<password> -- save network");
-    console_register_cmd("outbox", cmd_outbox, "print saved outgoing token");
+    console_register_cmd("outbox", cmd_outbox, "outbox [QR number] -- saved token or individual code");
     if (xTaskCreate(ui_task, "papers3_ui", 24576, nullptr, 3, nullptr) != pdPASS)
         papers3_fatal("Memory error", "Wallet UI task could not start.");
 }

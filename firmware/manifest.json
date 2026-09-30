@@ -1,7 +1,7 @@
 {
   "target": "esp32s3",
   "hardware": "M5Stack PaperS3",
-  "version": "0.1.0-papers3",
+  "version": "0.2.0-papers3",
   "idf": "5.5.1",
   "hardware_tested": false,
   "images": {
@@ -14,12 +14,12 @@
       "sha256": "675d7755b9179cdf93ada3df9fa7c11e8c42a228755775d7bdaee622bb7903df"
     },
     "papers3_cashu.bin": {
-      "bytes": 1292816,
-      "sha256": "b12c7841903b7bb98a63d32a18ab5eeb16545144d586a0672206f63146ba647c"
+      "bytes": 1300960,
+      "sha256": "8ecd1507386a5342cdc51ce4e12faa26faeec272588e0b7972ad871649fe36f1"
     },
     "papers3_cashu.elf": {
-      "bytes": 21766580,
-      "sha256": "6f92a9fe85a36e4f72bef6fac411188a385bff5832cd6b4dc59eaed96a0b8953"
+      "bytes": 22060832,
+      "sha256": "cdf56018985d802ea9a66d5d6fa709dc796ba9726881f761c3765db3dbcb3df0"
     },
     "sdkconfig.verified": {
       "bytes": 73083,

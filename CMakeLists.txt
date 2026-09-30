@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 set(ENV{IDF_COMPONENT_MANAGER} "0")
-set(PROJECT_VER "0.1.0-papers3")
+set(PROJECT_VER "0.2.0-papers3")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(papers3_cashu)
 
