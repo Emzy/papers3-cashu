@@ -6,6 +6,8 @@ An experimental native port of [Nucula](https://github.com/zeugmaster/nucula) to
 
 **Status: cross-compiled successfully; host storage, selection and QR tests pass; not flashed or tested on a physical PaperS3. Use a development mint with valueless test ecash. This is not a production wallet.** Network transaction recovery and physical device validation remain unfinished; see the limitations below.
 
+**License scope:** [MIT](LICENSE) applies to original PaperS3 port contributions by Stephan Oeste. It does not license the inherited Nucula wallet code, bundled third-party libraries, or firmware containing that code. Nucula's redistribution terms still need clarification; see [dependency provenance](DEPENDENCIES.md) before public distribution.
+
 ## Included
 
 - Native 960×540 landscape e-paper UI, GT911 touch controls, 16MB flash and octal PSRAM configuration.
