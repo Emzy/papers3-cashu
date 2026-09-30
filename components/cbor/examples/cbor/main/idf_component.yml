@@ -1,0 +1,5 @@
+## IDF Component Manager Manifest File
+dependencies:
+  espressif/cbor:
+    version: '*'
+    override_path: '../../../'

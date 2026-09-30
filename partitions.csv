@@ -1,0 +1,5 @@
+# PaperS3, 16MB. Preserve these offsets for upgrades.
+# Name, Type, SubType, Offset, Size, Flags
+nvs, data, nvs, 0x9000, 0xF6000,
+phy_init, data, phy, 0xFF000, 0x1000,
+factory, app, factory, 0x100000, 0x600000,
